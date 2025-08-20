@@ -2,50 +2,41 @@ pipeline {
     agent any
 
     environment {
+        AWS_DEFAULT_REGION = 'us-east-1'
         AWS_ACCOUNT_ID = '549328952286'
-        AWS_REGION = 'us-east-1'
-        ECR_REPO = 'demo-app'
-        CLUSTER_NAME = 'crafty-deer-yk0kpi'
-        SERVICE_NAME = 'demo-task-service-paynivjn'
-        TASK_FAMILY = 'demo-task'
-        CONTAINER_NAME = 'demo-app'
+        IMAGE_REPO_NAME = 'demo-app'
+        ECS_CLUSTER_NAME = 'demo-cluster'
+        ECS_SERVICE_NAME = 'demo-service'
     }
 
     stages {
-        stage('Checkout Code') {
+        stage('Checkout') {
             steps {
-                git branch: 'main', url: 'https://github.com/Abhish7899/demo-app.git'
-            }
-        }
-
-        stage('Login to ECR') {
-            steps {
-                script {
-                    sh '''
-                        aws ecr get-login-password --region $AWS_REGION \
-                        | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
-                    '''
-                }
+                git branch: 'main',
+                    url: 'https://github.com/Abhish7899/demo-app.git'
             }
         }
 
         stage('Build Docker Image') {
             steps {
                 script {
-                    sh '''
-                        docker build -t $ECR_REPO .
-                        docker tag $ECR_REPO:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest
-                    '''
+                    sh 'docker build -t $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:latest .'
                 }
             }
         }
 
-        stage('Push to ECR') {
+        stage('Login to ECR') {
             steps {
                 script {
-                    sh '''
-                        docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest
-                    '''
+                    sh 'aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com'
+                }
+            }
+        }
+
+        stage('Push Image to ECR') {
+            steps {
+                script {
+                    sh 'docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:latest'
                 }
             }
         }
@@ -53,23 +44,49 @@ pipeline {
         stage('Deploy to ECS') {
             steps {
                 script {
-                    sh '''
-                        # Create new task definition revision with latest image
-                        TASK_DEF=$(aws ecs describe-task-definition --task-definition $TASK_FAMILY)
-                        NEW_TASK_DEF=$(echo $TASK_DEF | jq --arg IMAGE "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO:latest" '.taskDefinition | .containerDefinitions[0].image=$IMAGE | {family: .family, containerDefinitions: .containerDefinitions}')
+                    IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:latest"
 
-                        echo $NEW_TASK_DEF > new-task-def.json
-                        aws ecs register-task-definition --cli-input-json file://new-task-def.json
+                    NEW_TASK_DEF="""{
+                        "family": "demo-task",
+                        "networkMode": "awsvpc",
+                        "requiresCompatibilities": ["FARGATE"],
+                        "cpu": "256",
+                        "memory": "512",
+                        "executionRoleArn": "arn:aws:iam::$AWS_ACCOUNT_ID:role/ecsTaskExecutionRole",
+                        "containerDefinitions": [
+                            {
+                                "name": "demo-app",
+                                "image": "$IMAGE",
+                                "cpu": 256,
+                                "memory": 512,
+                                "essential": true,
+                                "portMappings": [
+                                    {
+                                        "containerPort": 80,
+                                        "hostPort": 80,
+                                        "protocol": "tcp"
+                                    }
+                                ],
+                                "logConfiguration": {
+                                    "logDriver": "awslogs",
+                                    "options": {
+                                        "awslogs-group": "/ecs/demo-task",
+                                        "awslogs-region": "$AWS_DEFAULT_REGION",
+                                        "awslogs-stream-prefix": "ecs"
+                                    }
+                                }
+                            }
+                        ]
+                    }"""
 
-                        # Update ECS service to use new task definition
-                        aws ecs update-service \
-                            --cluster $CLUSTER_NAME \
-                            --service $SERVICE_NAME \
-                            --task-definition $TASK_FAMILY
-                    '''
+                    // Register new task definition
+                    sh """echo '$NEW_TASK_DEF' > taskdef.json"""
+                    sh "aws ecs register-task-definition --cli-input-json file://taskdef.json"
+
+                    // Update ECS service
+                    sh "aws ecs update-service --cluster $ECS_CLUSTER_NAME --service $ECS_SERVICE_NAME --force-new-deployment"
                 }
             }
         }
     }
 }
-
