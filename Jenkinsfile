@@ -1,92 +1,78 @@
 pipeline {
-    agent any
+  agent any
+  environment {
+    AWS_REGION     = 'us-east-1'                 
+    AWS_ACCOUNT_ID = '549328952286'          
+    ECR_REPO       = 'demo-app'
+    IMAGE_TAG      = "${env.BUILD_NUMBER}"        
+    IMAGE_URI      = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"
 
-    environment {
-        AWS_DEFAULT_REGION = 'us-east-1'
-        AWS_ACCOUNT_ID = '549328952286'
-        IMAGE_REPO_NAME = 'demo-app'
-        ECS_CLUSTER_NAME = 'demo-cluster'
-        ECS_SERVICE_NAME = 'demo-service'
+    CLUSTER_NAME   = 'crafty-deer-yk0kpi'
+    SERVICE_NAME   = 'demo-task-service-paynivjn'
+    TASK_FAMILY    = 'demo-task'              
+    CONTAINER_NAME = 'demo-app'                   
+  }
+  options { timestamps() }
+  stages {
+    stage('Checkout') {
+      steps { checkout scm }
     }
+    stage('Docker build') {
+      steps {
+        sh """
+          aws --version
+          echo Logging in to ECR...
+          aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
-    stages {
-        stage('Checkout') {
-            steps {
-                git branch: 'main',
-                    url: 'https://github.com/Abhish7899/demo-app.git'
-            }
-        }
+          # Ensure repo exists (safe if already exists)
+          aws ecr describe-repositories --repository-names ${ECR_REPO} --region ${AWS_REGION} >/dev/null 2>&1 || \
+            aws ecr create-repository --repository-name ${ECR_REPO} --region ${AWS_REGION}
 
-        stage('Build Docker Image') {
-            steps {
-                script {
-                    sh 'docker build -t $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:latest .'
-                }
-            }
-        }
+          echo Building image...
+          docker build -t ${ECR_REPO}:${IMAGE_TAG} .
 
-        stage('Login to ECR') {
-            steps {
-                script {
-                    sh 'aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com'
-                }
-            }
-        }
-
-        stage('Push Image to ECR') {
-            steps {
-                script {
-                    sh 'docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:latest'
-                }
-            }
-        }
-
-        stage('Deploy to ECS') {
-            steps {
-                script {
-                    IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:latest"
-
-                    NEW_TASK_DEF="""{
-                        "family": "demo-task",
-                        "networkMode": "awsvpc",
-                        "requiresCompatibilities": ["FARGATE"],
-                        "cpu": "256",
-                        "memory": "512",
-                        "executionRoleArn": "arn:aws:iam::$AWS_ACCOUNT_ID:role/ecsTaskExecutionRole",
-                        "containerDefinitions": [
-                            {
-                                "name": "demo-app",
-                                "image": "$IMAGE",
-                                "cpu": 256,
-                                "memory": 512,
-                                "essential": true,
-                                "portMappings": [
-                                    {
-                                        "containerPort": 80,
-                                        "hostPort": 80,
-                                        "protocol": "tcp"
-                                    }
-                                ],
-                                "logConfiguration": {
-                                    "logDriver": "awslogs",
-                                    "options": {
-                                        "awslogs-group": "/ecs/demo-task",
-                                        "awslogs-region": "$AWS_DEFAULT_REGION",
-                                        "awslogs-stream-prefix": "ecs"
-                                    }
-                                }
-                            }
-                        ]
-                    }"""
-
-                    // Register new task definition
-                    sh """echo '$NEW_TASK_DEF' > taskdef.json"""
-                    sh "aws ecs register-task-definition --cli-input-json file://taskdef.json"
-
-                    // Update ECS service
-                    sh "aws ecs update-service --cluster $ECS_CLUSTER_NAME --service $ECS_SERVICE_NAME --force-new-deployment"
-                }
-            }
-        }
+          docker tag ${ECR_REPO}:${IMAGE_TAG} ${IMAGE_URI}
+          docker push ${IMAGE_URI}
+        """
+      }
     }
+    stage('Deploy to ECS') {
+      steps {
+        sh """
+          echo "Fetching current task definition JSON..."
+          aws ecs describe-task-definition \
+            --task-definition ${TASK_FAMILY} \
+            --region ${AWS_REGION} \
+            --query 'taskDefinition' --output json > td.json
+
+          echo "Producing a new revision with updated image..."
+          # Remove fields not allowed on register and set new image
+          cat td.json | jq '
+            del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.registeredAt,.registeredBy,.compatibilities)
+            | .containerDefinitions = (.containerDefinitions | map(
+                if .name=="${CONTAINER_NAME}" then .image="${IMAGE_URI}" else . end
+              ))
+          ' > new-td.json
+
+          NEW_TD_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-td.json \
+            --region ${AWS_REGION} \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          echo "Updating service to new task definition: $NEW_TD_ARN"
+          aws ecs update-service \
+            --cluster ${CLUSTER_NAME} \
+            --service ${SERVICE_NAME} \
+            --task-definition $NEW_TD_ARN \
+            --region ${AWS_REGION}
+        """
+      }
+    }
+  }
+  post {
+    success {
+      echo "Deployed ${IMAGE_URI} to ${SERVICE_NAME} on ${CLUSTER_NAME}"
+    }
+  }
 }
+
