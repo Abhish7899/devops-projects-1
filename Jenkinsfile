@@ -1,7 +1,9 @@
+
 pipeline {
     agent any
 
     environment {
+        AWS_ACCOUNT_ID = '771805192968'
         AWS_DEFAULT_REGION = 'eu-north-1'
         ECR_REPO_NAME = 'devops-demo-app'
         IMAGE_TAG = "v${env.BUILD_NUMBER}"
@@ -57,6 +59,23 @@ pipeline {
 
                     echo "🔹 Deploying app to EKS..."
                     kubectl apply -f k8s/deployment.yaml
-                    kubectl ap
+                    kubectl apply -f k8s/service.yaml
 
+                    echo "🔹 Checking app status..."
+                    kubectl get pods
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Deployment successful — app should now be running on EKS!"
+        }
+        failure {
+            echo "❌ Deployment failed — check Jenkins console logs for details."
+        }
+    }
+}
 
