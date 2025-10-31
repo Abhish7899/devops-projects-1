@@ -2,53 +2,76 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_IMAGE = "abhishekdhurwade/demo-app:latest"
-        KUBECONFIG_PATH = "/var/lib/jenkins/.kube/config"
+        AWS_DEFAULT_REGION = 'eu-north-1'
+        AWS_CREDENTIALS = credentials('aws-creds')
     }
 
     stages {
         stage('Checkout Code') {
             steps {
-                git branch: 'main',
-                    url: 'https://github.com/Abhish7899/demo-app.git'
+                git branch: 'main', url: 'https://github.com/Abhish7899/devops-projects-1.git'
             }
         }
 
-        stage('Build Docker Image') {
+        stage('Terraform Init & Apply') {
             steps {
-                script {
-                    sh "docker build -t ${DOCKER_IMAGE} ."
-                }
-            }
-        }
-
-        stage('Push to Docker Hub') {
-            steps {
-                script {
-                    withDockerRegistry([ credentialsId: 'docker-hub-credentials', url: '' ]) {
-                        sh "docker push ${DOCKER_IMAGE}"
+                dir('terraform') {
+                    withAWS(credentials: 'aws-creds', region: "${AWS_DEFAULT_REGION}") {
+                        sh '''
+                            echo "🔹 Initializing Terraform..."
+                            terraform init
+                            echo "🔹 Applying Terraform..."
+                            terraform apply -auto-approve
+                        '''
                     }
                 }
             }
         }
 
-        stage('Deploy to Kubernetes') {
+        stage('Build & Push Docker Image') {
             steps {
                 script {
-                    sh "kubectl apply -f k8s/deployment.yaml --kubeconfig=${KUBECONFIG_PATH}"
-                    sh "kubectl apply -f k8s/service.yaml --kubeconfig=${KUBECONFIG_PATH}"
+                    sh '''
+                        echo "🔹 Logging into Amazon ECR..."
+                        aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin 771805192968.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+
+                        echo "🔹 Building Docker image..."
+                        docker build -t devops-app .
+
+                        echo "🔹 Tagging image for ECR..."
+                        docker tag devops-app:latest 771805192968.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/devops-app:latest
+
+                        echo "🔹 Pushing image to ECR..."
+                        docker push 771805192968.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/devops-app:latest
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to EKS') {
+            steps {
+                script {
+                    sh '''
+                        echo "🔹 Updating kubeconfig for EKS..."
+                        aws eks update-kubeconfig --region ${AWS_DEFAULT_REGION} --name devops-eks-cluster
+
+                        echo "🔹 Deploying application to EKS..."
+                        kubectl apply -f k8s/
+
+                        echo "🔹 Checking pods and services..."
+                        kubectl get pods
+                        kubectl get svc
+                    '''
                 }
             }
         }
     }
 
     post {
-        success {
-            echo "Pipeline completed successfully!"
-        }
-        failure {
-            echo "Pipeline failed. Check logs for errors."
+        always {
+            echo "✅ Pipeline completed successfully — check AWS Console for resources and EKS app deployment."
         }
     }
 }
+
 
