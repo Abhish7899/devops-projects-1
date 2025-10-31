@@ -3,7 +3,8 @@ pipeline {
 
     environment {
         AWS_DEFAULT_REGION = 'eu-north-1'
-        AWS_CREDENTIALS = credentials('aws-creds')
+        ECR_REPO_NAME = 'devops-demo-app'
+        IMAGE_TAG = "v${env.BUILD_NUMBER}"
     }
 
     stages {
@@ -13,65 +14,49 @@ pipeline {
             }
         }
 
-        stage('Terraform Init & Apply') {
-            steps {
-                dir('terraform') {
-                    withAWS(credentials: 'aws-creds', region: "${AWS_DEFAULT_REGION}") {
-                        sh '''
-                            echo "🔹 Initializing Terraform..."
-                            terraform init
-                            echo "🔹 Applying Terraform..."
-                            terraform apply -auto-approve
-                        '''
-                    }
-                }
-            }
-        }
-
-        stage('Build & Push Docker Image') {
+        stage('Build Docker Image') {
             steps {
                 script {
                     sh '''
-                        echo "🔹 Logging into Amazon ECR..."
-                        aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin 771805192968.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
-
-                        echo "🔹 Building Docker image..."
-                        docker build -t devops-app .
-
-                        echo "🔹 Tagging image for ECR..."
-                        docker tag devops-app:latest 771805192968.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/devops-app:latest
-
-                        echo "🔹 Pushing image to ECR..."
-                        docker push 771805192968.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/devops-app:latest
+                    echo "🔹 Building Docker image..."
+                    docker build -t ${ECR_REPO_NAME}:${IMAGE_TAG} .
                     '''
                 }
             }
         }
 
-        stage('Deploy to EKS') {
+        stage('Login to AWS ECR') {
             steps {
                 script {
                     sh '''
-                        echo "🔹 Updating kubeconfig for EKS..."
-                        aws eks update-kubeconfig --region ${AWS_DEFAULT_REGION} --name devops-eks-cluster
-
-                        echo "🔹 Deploying application to EKS..."
-                        kubectl apply -f k8s/
-
-                        echo "🔹 Checking pods and services..."
-                        kubectl get pods
-                        kubectl get svc
+                    echo "🔹 Logging into AWS ECR..."
+                    aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
                     '''
                 }
             }
         }
-    }
 
-    post {
-        always {
-            echo "✅ Pipeline completed successfully — check AWS Console for resources and EKS app deployment."
+        stage('Tag & Push Docker Image to ECR') {
+            steps {
+                script {
+                    sh '''
+                    echo "🔹 Tagging and pushing image to ECR..."
+                    docker tag ${ECR_REPO_NAME}:${IMAGE_TAG} ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
+                    docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}
+                    '''
+                }
+            }
         }
-    }
-}
+
+        stage('Deploy to EKS Cluster') {
+            steps {
+                script {
+                    sh '''
+                    echo "🔹 Updating kubeconfig for EKS..."
+                    aws eks update-kubeconfig --region ${AWS_DEFAULT_REGION} --name devops-eks-cluster
+
+                    echo "🔹 Deploying app to EKS..."
+                    kubectl apply -f k8s/deployment.yaml
+                    kubectl ap
 
 
